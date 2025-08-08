@@ -10,6 +10,8 @@ import { getModeParams } from '../systems/ModeRules';
 import { InputSystem } from '../input/InputSystem';
 import { PlayerEntity } from '../entities/Player';
 import { NetClient } from '../net/NetClient';
+import { StatsSystem } from '../systems/StatsSystem';
+import { AdvisorSystem } from '../systems/AdvisorSystem';
 
 export class GameScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -52,6 +54,13 @@ export class GameScene extends Phaser.Scene {
   private playerEntity!: PlayerEntity;
   private net = new NetClient();
   private remotes: Record<string, Phaser.GameObjects.Rectangle> = {};
+  private stats = new StatsSystem();
+  private advisor = new AdvisorSystem(this.stats, () => ({ mode: this.mode, level: this.levels.levelIndex, coins: this.currency.state.coins, gems: this.currency.state.gems, selectedCharId: this.roster.selected }));
+  private assistantEl!: HTMLDivElement;
+  private assistantMessages!: HTMLDivElement;
+  private assistantStats!: HTMLDivElement;
+  private assistantInput!: HTMLInputElement;
+  private assistantVisible = false;
 
   constructor() {
     super('GameScene');
@@ -73,6 +82,18 @@ export class GameScene extends Phaser.Scene {
 
     this.uiEl = document.getElementById('ui') as HTMLDivElement;
     this.menuEl = document.getElementById('menu') as HTMLDivElement;
+    this.assistantEl = document.getElementById('assistant') as HTMLDivElement;
+    this.assistantMessages = document.getElementById('assistant-messages') as HTMLDivElement;
+    this.assistantStats = document.getElementById('assistant-stats') as HTMLDivElement;
+    this.assistantInput = document.getElementById('assistant-input') as HTMLInputElement;
+
+    // Bind assistant send
+    const sendBtn = document.getElementById('assistant-send');
+    if (sendBtn) sendBtn.addEventListener('click', () => this.onAssistantSend());
+
+    // Toggle with H key
+    const hKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.H);
+    hKey.on('down', () => this.toggleAssistant());
 
     if ((save as any).mobile) this.mobile.show();
 
@@ -120,6 +141,7 @@ export class GameScene extends Phaser.Scene {
     });
 
     this.updateUi();
+    this.pushAssistantTips();
   }
 
   update(_: number, dt: number): void {
@@ -149,10 +171,12 @@ export class GameScene extends Phaser.Scene {
     const char = CHARACTERS.find((c) => c.id === this.roster.selected)!;
     const abilitiesFree = params.abilitiesFree === true;
     if (input.abilityE) {
+      this.stats.onAbilityUse();
       if (abilitiesFree) this.abilitySystem.getAbility(char.primaryAbility).execute({ scene: this, player: this.player, enemies: this.enemies });
       else this.abilitySystem.tryUse(char.primaryAbility, { scene: this, player: this.player, enemies: this.enemies }, now);
     }
     if (input.abilityQ) {
+      this.stats.onAbilityUse();
       if (abilitiesFree) this.abilitySystem.getAbility(char.secondaryAbility).execute({ scene: this, player: this.player, enemies: this.enemies });
       else this.abilitySystem.tryUse(char.secondaryAbility, { scene: this, player: this.player, enemies: this.enemies }, now);
     }
@@ -223,13 +247,14 @@ export class GameScene extends Phaser.Scene {
       return null;
     });
 
-    // Damage to player on overlap
+    // Damage to player on overlap (track stats)
     this.physics.overlap(this.player, this.enemies, (_p, e) => {
       const enemy = e as Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
       if (!enemy.getData('touched')) {
         enemy.setData('touched', true);
         if (params.playerTakesDamage !== false) {
           this.hp = Math.max(0, this.hp - 5);
+          this.stats.onDamageTaken(5);
           if (this.hp <= 0) {
             this.gameOver();
           }
@@ -267,6 +292,7 @@ export class GameScene extends Phaser.Scene {
       return null;
     });
 
+    this.updateAssistant();
     this.updateUiThrottled(now);
   }
 
@@ -292,6 +318,7 @@ export class GameScene extends Phaser.Scene {
         const hp = (enemy.getData('hp') as number) ?? 1;
         const atk = 10; // base
         const newHp = hp - atk;
+        this.stats.onDamageDealt(Math.min(atk, hp));
         enemy.setData('hp', newHp);
         enemy.setTint(0xffaaaa);
         this.time.delayedCall(80, () => enemy.clearTint());
@@ -318,16 +345,19 @@ export class GameScene extends Phaser.Scene {
     this.killCount += 1;
     this.score += 10;
     this.currency.addCoins(1);
-    if (Math.random() < 0.05) this.currency.addGems(1);
+    this.stats.onCoin(1);
+    if (Math.random() < 0.05) { this.currency.addGems(1); this.stats.onGem(1); }
 
     if (this.killCount % 25 === 0 && this.mode !== 'arena') {
       this.levels.nextLevel();
+      this.stats.onLevelGain();
       this.hp = Math.min(100, this.hp + 20);
     }
 
     const coin = this.add.circle(enemy.x, enemy.y, 4, 0xffd166);
     this.tweens.add({ targets: coin, y: coin.y - 20, alpha: 0, duration: 500, onComplete: () => coin.destroy() });
 
+    this.stats.onEnemyDefeated();
     this.updateUi();
     this.saveGame();
   }
@@ -346,6 +376,7 @@ export class GameScene extends Phaser.Scene {
     enemy.setVelocityX(x < 480 ? 120 : -120);
     enemy.setBounce(0.05);
     this.enemies.add(enemy);
+    this.stats.onEnemySpawn();
   }
 
   private resetModeState(): void {
@@ -428,6 +459,18 @@ export class GameScene extends Phaser.Scene {
       this.bindMenuEvents();
     } else {
       this.menuEl.innerHTML = '';
+    }
+
+    // Add Assistant toggle button to UI
+    const ui = this.uiEl.innerHTML;
+    const toggleBtn = `<span class="btn" id="btn-assistant">${this.assistantVisible ? 'Hide' : 'Show'} Assistant (H)</span>`;
+    if (!ui.includes('btn-assistant')) {
+      this.uiEl.innerHTML = ui.replace('</div></div>', `${toggleBtn}</div></div>`);
+      const btn = document.getElementById('btn-assistant');
+      if (btn) btn.addEventListener('click', () => this.toggleAssistant());
+    } else {
+      const btn = document.getElementById('btn-assistant');
+      if (btn) btn.textContent = `${this.assistantVisible ? 'Hide' : 'Show'} Assistant (H)`;
     }
   }
 
@@ -557,4 +600,38 @@ export class GameScene extends Phaser.Scene {
       }
     });
   }
+
+  private toggleAssistant(): void {
+    this.assistantVisible = !this.assistantVisible;
+    this.assistantEl.style.display = this.assistantVisible ? 'block' : 'none';
+    if (this.assistantVisible) this.updateAssistant(true);
+    this.updateUi();
+  }
+
+  private updateAssistant(force = false): void {
+    if (!this.assistantVisible && !force) return;
+    const statsHtml = this.advisor.renderStatsHtml();
+    this.assistantStats.innerHTML = statsHtml;
+  }
+
+  private onAssistantSend(): void {
+    const q = this.assistantInput.value.trim();
+    if (!q) return;
+    const a = this.advisor.answer(q);
+    const msg = document.createElement('div');
+    msg.innerHTML = `<div><strong>You:</strong> ${escapeHtml(q)}</div><div><strong>AI:</strong> ${escapeHtml(a)}</div><hr>`;
+    this.assistantMessages.prepend(msg);
+    this.assistantInput.value = '';
+  }
+
+  private pushAssistantTips(): void {
+    const tips = this.advisor.getTips();
+    const box = document.createElement('div');
+    box.innerHTML = tips.map(t => `<div>• ${escapeHtml(t)}</div>`).join('');
+    this.assistantMessages.prepend(box);
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
