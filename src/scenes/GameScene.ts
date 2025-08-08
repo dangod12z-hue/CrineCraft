@@ -7,6 +7,9 @@ import { AbilitySystem } from '../systems/AbilitySystem';
 import { RosterSystem, CHARACTERS } from '../systems/RosterSystem';
 import { MobileControls } from '../systems/MobileControls';
 import { getModeParams } from '../systems/ModeRules';
+import { InputSystem } from '../input/InputSystem';
+import { PlayerEntity } from '../entities/Player';
+import { NetClient } from '../net/NetClient';
 
 export class GameScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -45,6 +48,10 @@ export class GameScene extends Phaser.Scene {
   private nextBossAt = 0;
 
   private mobile = new MobileControls();
+  private inputSystem!: InputSystem;
+  private playerEntity!: PlayerEntity;
+  private net = new NetClient();
+  private remotes: Record<string, Phaser.GameObjects.Rectangle> = {};
 
   constructor() {
     super('GameScene');
@@ -75,13 +82,6 @@ export class GameScene extends Phaser.Scene {
     const groundRect = this.add.rectangle(480, 520, 960, 40, 0x1f2937).setOrigin(0.5, 0.5);
     this.ground.add(groundRect);
 
-    this.player = this.physics.add.sprite(200, 360, 'player');
-    this.player.setCollideWorldBounds(true);
-    this.player.setBounce(0.1);
-    this.player.body.setSize(26, 64).setOffset(3, 0);
-
-    this.physics.add.collider(this.player, this.ground);
-
     this.enemies = this.physics.add.group({ collideWorldBounds: true });
     this.physics.add.collider(this.enemies, this.ground);
 
@@ -102,17 +102,30 @@ export class GameScene extends Phaser.Scene {
       this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.FIVE),
     ];
 
+    // Input abstraction and player entity
+    this.inputSystem = new InputSystem(this, this.mobile);
+    this.playerEntity = new PlayerEntity(this, 200, 360);
+    this.player = this.playerEntity.sprite; // keep old references working
+
     this.resetModeState();
+
+    // Colliders
+    this.physics.add.collider(this.playerEntity.sprite, this.ground);
+
+    // Networking
+    this.net.connect((evt) => {
+      if (evt.type === 'state') {
+        this.syncRemotes(evt.players);
+      }
+    });
+
     this.updateUi();
   }
 
   update(_: number, dt: number): void {
     const now = this.time.now;
 
-    if (Phaser.Input.Keyboard.JustDown(this.pauseKey)) {
-      this.togglePause();
-    }
-
+    if (Phaser.Input.Keyboard.JustDown(this.pauseKey)) this.togglePause();
     if (this.isPaused) return;
 
     const params = getModeParams(this.mode, this.levels.levelIndex);
@@ -122,30 +135,12 @@ export class GameScene extends Phaser.Scene {
     const currentHpMax = 100; // base used for clamps
     this.hp = Math.min(targetHpMax, this.hp);
 
-    // Player movement (keyboard + mobile)
-    const speed = 240 * (this.mode === 'challenge' ? 0.95 : 1);
-    const movingLeft = this.cursors.left?.isDown || this.mobile.left;
-    const movingRight = this.cursors.right?.isDown || this.mobile.right;
-    if (movingLeft && !movingRight) {
-      this.player.setVelocityX(-speed);
-      this.player.setFlipX(true);
-    } else if (movingRight && !movingLeft) {
-      this.player.setVelocityX(speed);
-      this.player.setFlipX(false);
-    } else {
-      this.player.setVelocityX(0);
-    }
-
-    const jumpPressed = Phaser.Input.Keyboard.JustDown(this.cursors.up!) || this.mobile.jump;
-    if (jumpPressed) {
-      if (this.player.body.blocked.down) {
-        this.player.setVelocityY(-520);
-      }
-    }
+    // Player movement via input system
+    const input = this.inputSystem.sample();
+    this.playerEntity.updateFromInput(input);
 
     // Attack
-    const attackPressed = Phaser.Input.Keyboard.JustDown(this.attackKey) || this.mobile.attack;
-    if (attackPressed && (now - this.lastAttackMs) > this.attackCooldownMs) {
+    if (input.attack && (now - this.lastAttackMs) > this.attackCooldownMs) {
       this.lastAttackMs = now;
       this.performAttack();
     }
@@ -153,11 +148,11 @@ export class GameScene extends Phaser.Scene {
     // Abilities
     const char = CHARACTERS.find((c) => c.id === this.roster.selected)!;
     const abilitiesFree = params.abilitiesFree === true;
-    if ((Phaser.Input.Keyboard.JustDown(this.abilityPrimaryKey) || this.mobile.abilityE)) {
+    if (input.abilityE) {
       if (abilitiesFree) this.abilitySystem.getAbility(char.primaryAbility).execute({ scene: this, player: this.player, enemies: this.enemies });
       else this.abilitySystem.tryUse(char.primaryAbility, { scene: this, player: this.player, enemies: this.enemies }, now);
     }
-    if ((Phaser.Input.Keyboard.JustDown(this.abilitySecondaryKey) || this.mobile.abilityQ)) {
+    if (input.abilityQ) {
       if (abilitiesFree) this.abilitySystem.getAbility(char.secondaryAbility).execute({ scene: this, player: this.player, enemies: this.enemies });
       else this.abilitySystem.tryUse(char.secondaryAbility, { scene: this, player: this.player, enemies: this.enemies }, now);
     }
@@ -538,5 +533,28 @@ export class GameScene extends Phaser.Scene {
   private showToast(text: string): void {
     const t = this.add.text(480, 60, text, { color: '#fff', fontSize: '18px' }).setOrigin(0.5);
     this.tweens.add({ targets: t, y: 40, alpha: 0, duration: 1000, onComplete: () => t.destroy() });
+  }
+
+  private syncRemotes(players: Record<string, { x: number; y: number; flipX: boolean }>): void {
+    // create/update remote representations
+    Object.entries(players).forEach(([id, s]) => {
+      if (id === this.net.id) return; // skip self
+      let rect = this.remotes[id];
+      if (!rect) {
+        rect = this.add.rectangle(s.x, s.y, 32, 64, 0x6ee7b7).setOrigin(0.5, 0.5);
+        this.remotes[id] = rect;
+      }
+      rect.x = s.x;
+      rect.y = s.y;
+      rect.setScale(s.flipX ? -1 : 1, 1);
+    });
+
+    // remove stale
+    Object.keys(this.remotes).forEach((id) => {
+      if (!players[id]) {
+        this.remotes[id].destroy();
+        delete this.remotes[id];
+      }
+    });
   }
 }
