@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ArcStickLegends</string>
+    <string name="title_activity_main">ArcStickLegends</string>
+    <string name="package_name">com.arcstick.legends</string>
+    <string name="custom_url_scheme">com.arcstick.legends</string>
+</resources>
