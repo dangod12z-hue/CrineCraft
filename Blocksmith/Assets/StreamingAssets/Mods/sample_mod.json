@@ -1,0 +1,9 @@
+{
+  "modId": "example.core",
+  "displayName": "Example Core Mod",
+  "version": "0.1.0",
+  "blocks": [ {"id": "example:glow_block", "displayName": "Glow Block", "solid": true, "redstone": false} ],
+  "items": [ {"id": "example:gear", "displayName": "Gear", "type": "Ingredient", "maxStack": 64} ],
+  "mobs": [ {"id": "example:critter", "displayName": "Critter", "hostile": false, "health": 8.0} ],
+  "recipes": [ {"id": "craft_gear","type": "Crafting","inputs": ["iron_ingot","iron_ingot"],"output": "example:gear","count": 1} ]
+}

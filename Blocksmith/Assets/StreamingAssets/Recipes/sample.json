@@ -1,0 +1,7 @@
+{
+  "recipes": [
+    {"id":"smelt_iron","type":"Smelting","inputs":["iron_ore"],"output":"iron_ingot","count":1},
+    {"id":"brew_speed","type":"Brewing","inputs":["awkward_potion","sugar"],"output":"potion_speed","count":1},
+    {"id":"ench_sharp","type":"Enchanting","inputs":["book","lapis","sword"],"output":"book_sharpness","count":1}
+  ]
+}
